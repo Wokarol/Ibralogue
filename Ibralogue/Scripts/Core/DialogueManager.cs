@@ -16,17 +16,8 @@ namespace Ibralogue
         public static readonly Dictionary<string, string> GlobalVariables = new Dictionary<string, string>();
     }
 
-    public abstract class DialogueManagerBase<ChoiceButtonT> : MonoBehaviour where ChoiceButtonT : Component
+    public class SimpleDialogueView<ChoiceButtonT> : DialogueViewBase where ChoiceButtonT : Component
     {
-        public UnityEvent OnConversationStart { get; set; } = new UnityEvent();
-        public UnityEvent OnConversationEnd { get; set; } = new UnityEvent();
-
-        public List<Conversation> ParsedConversations { get; protected set; }
-        protected Conversation _currentConversation;
-
-        protected int _dialogueIndex;
-        protected bool _linePlaying;
-
         [Header("Dialogue UI")]
         [SerializeField] protected float scrollSpeed = 25f;
         [SerializeField] protected TextMeshProUGUI nameText;
@@ -38,6 +29,65 @@ namespace Ibralogue
         [SerializeField] protected ChoiceButtonT choiceButton;
         protected List<ChoiceButtonHandle> _choiceButtonInstances = new List<ChoiceButtonHandle>();
 
+        public override void ShowDialogue(string speakerName, Sprite speakerImage, string lineText)
+        {
+            nameText.text = speakerName; 
+            sentenceText.text = lineText;
+
+            speakerPortrait.color = speakerImage == null ? new Color(0, 0, 0, 0) : new Color(255, 255, 255, 255);
+            speakerPortrait.sprite = speakerImage;
+        }
+
+        public override IEnumerator AnimateText(Action<int> callInvocationAt)
+        {
+            int index = 0;
+            // FIX: Yikes
+            while (index < _currentConversation.Lines[_dialogueIndex].LineContent.Text.Length)
+            {
+                index++;
+                sentenceText.maxVisibleCharacters++;
+                yield return new WaitForSeconds(1f / scrollSpeed);
+            }
+        }
+
+        /// <summary>
+        /// Represent a single spawned choice button, contains general information about said button
+        /// </summary>
+        protected class ChoiceButtonHandle
+        {
+            public ChoiceButtonHandle(ChoiceButtonT choiceButton, UnityAction clickCallback)
+            {
+                ChoiceButton = choiceButton;
+                ClickCallback = clickCallback;
+            }
+
+            public UnityEvent ClickEvent { get; set; }
+
+            public ChoiceButtonT ChoiceButton { get; private set; }
+            public UnityAction ClickCallback { get; private set; }
+
+        }
+    }
+
+    public abstract class DialogueViewBase : MonoBehaviour
+    {
+        public abstract void ShowDialogue(string speakerName, Sprite speakerImage, string lineText);
+        public abstract IEnumerator AnimateText(Action<int> callInvocationAt);
+    }
+
+    public abstract class DialogueManager : MonoBehaviour
+    {
+        public UnityEvent OnConversationStart { get; set; } = new UnityEvent();
+        public UnityEvent OnConversationEnd { get; set; } = new UnityEvent();
+
+        public List<Conversation> ParsedConversations { get; protected set; }
+        protected Conversation _currentConversation;
+
+        protected int _dialogueIndex;
+        protected bool _linePlaying;
+
+
+        [SerializeField] private DialogueViewBase dialogueView;
         [Header("Function Invocations")]
         [SerializeField] private bool searchAllAssemblies;
         [SerializeField] private List<string> includedAssemblies;
@@ -77,20 +127,21 @@ namespace Ibralogue
         /// </summary>
         private IEnumerator DisplayDialogue()
         {
-            nameText.text = _currentConversation.Lines[_dialogueIndex].Speaker;
             _linePlaying = true;
-            sentenceText.text = _currentConversation.Lines[_dialogueIndex].LineContent.Text;
+
+            dialogueView.ShowDialogue(
+                speakerName: _currentConversation.Lines[_dialogueIndex].Speaker,
+                speakerImage: _currentConversation.Lines[_dialogueIndex].SpeakerImage,
+                lineText: _currentConversation.Lines[_dialogueIndex].LineContent.Text
+            );
 
             IEnumerable<MethodInfo> allDialogueMethods = GetDialogueMethods();
-            Dictionary<int, string> functionInvocations = new Dictionary<int, string>();
-            functionInvocations = _currentConversation.Lines[_dialogueIndex].LineContent.Invocations;
+            
+            Dictionary<int, string> functionInvocations = _currentConversation.Lines[_dialogueIndex].LineContent.Invocations;
 
-            DisplaySpeakerImage();
-            int index = 0;
-            while (index < _currentConversation.Lines[_dialogueIndex].LineContent.Text.Length)
+            yield return dialogueView.AnimateText(characterIndex =>
             {
-                if (functionInvocations != null && functionInvocations
-                        .TryGetValue(sentenceText.maxVisibleCharacters, out string functionName))
+                if (functionInvocations != null && functionInvocations.TryGetValue(characterIndex, out string functionName))
                 {
                     foreach (MethodInfo methodInfo in allDialogueMethods)
                     {
@@ -100,10 +151,10 @@ namespace Ibralogue
                         if (methodInfo.ReturnType == typeof(string))
                         {
                             string replacedText = (string)methodInfo.Invoke(null, null);
+                            // FIX: Moving the index means that LineContentText might still contain the tags, yikes
                             string processedSentence = _currentConversation.Lines[_dialogueIndex].LineContent.Text.Insert(index, replacedText);
                             sentenceText.text = processedSentence;
-                            index -= processedSentence.Length -
-                                     _currentConversation.Lines[_dialogueIndex].LineContent.Text.Length;
+                            index -= processedSentence.Length - _currentConversation.Lines[_dialogueIndex].LineContent.Text.Length;
                         }
                         else
                         {
@@ -111,13 +162,9 @@ namespace Ibralogue
                         }
                     }
                 }
-                index++;
-                sentenceText.maxVisibleCharacters++;
-                yield return new WaitForSeconds(1f / scrollSpeed);
-            }
+            });
 
             _linePlaying = false;
-            yield return null;
         }
 
         /// <summary>
@@ -209,15 +256,6 @@ namespace Ibralogue
         }
 
         /// <summary>
-        /// Sets the speaker image and makes the Image transparent if there is no speaker image.
-        /// </summary>
-        protected void DisplaySpeakerImage()
-        {
-            speakerPortrait.color = _currentConversation.Lines[_dialogueIndex].SpeakerImage == null ? new Color(0, 0, 0, 0) : new Color(255, 255, 255, 255);
-            speakerPortrait.sprite = _currentConversation.Lines[_dialogueIndex].SpeakerImage;
-        }
-
-        /// <summary>
         /// Clears all text and Images in the dialogue box.
         /// </summary>
         private void ClearDialogueBox(bool newConversation = false)
@@ -254,24 +292,6 @@ namespace Ibralogue
         protected virtual void RemoveChoiceButton(ChoiceButtonHandle buttonHandle)
         {
             Destroy(buttonHandle.ChoiceButton.gameObject);
-        }
-
-        /// <summary>
-        /// Represent a single spawned choice button, contains general information about said button
-        /// </summary>
-        protected class ChoiceButtonHandle
-        {
-            public ChoiceButtonHandle(ChoiceButtonT choiceButton, UnityAction clickCallback)
-            {
-                ChoiceButton = choiceButton;
-                ClickCallback = clickCallback;
-            }
-
-            public UnityEvent ClickEvent { get; set; }
-
-            public ChoiceButtonT ChoiceButton { get; private set; }
-            public UnityAction ClickCallback { get;  private set; }
-            
         }
     }
 }
